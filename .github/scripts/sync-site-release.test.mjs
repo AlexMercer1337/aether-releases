@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { describeRelease, verifyFiles, renderUpdate, compareVersions, parseVersion, publicDownload, loadVerifiedRelease, syncSite } from './sync-site-release.mjs';
+import { describeRelease, verifyFiles, renderUpdate, compareVersions, parseVersion, publicDownload, fetchReleaseMetadata, loadVerifiedRelease, syncSite } from './sync-site-release.mjs';
 
 const digest = data => createHash('sha256').update(data).digest('hex');
 function fixture(version = '0.1.0-beta.19') {
@@ -112,6 +112,16 @@ test('download redirect cannot carry credentials or reach an unrelated server', 
 });
 test('download size is bounded even without a Content-Length header', async () => {
   await assert.rejects(publicDownload('https://github.com/file', 2, async () => new Response('too long')));
+});
+test('the built-in token is scoped to the release metadata request with redirects disabled', async () => {
+  const fixtureRelease = fixture().release;
+  const result = await fetchReleaseMetadata(fixtureRelease.tag_name, 'synthetic-read-token', async (url, options) => {
+    assert.equal(url, 'https://api.github.com/repos/AlexMercer1337/aether-releases/releases/tags/v0.1.0-beta.19');
+    assert.equal(options.headers.Authorization, 'Bearer synthetic-read-token');
+    assert.equal(options.redirect, 'error');
+    return Response.json(fixtureRelease);
+  });
+  assert.deepEqual(result, fixtureRelease);
 });
 test('publication with assets still uploading is retried before accepting the release', async () => {
   const f = fixture(); let calls = 0, waits = 0;

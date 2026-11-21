@@ -154,17 +154,27 @@ export async function publicDownload(address, limit, fetcher = fetch) {
   }
   throw new Error('Too many download redirects');
 }
-async function publicJson(path) {
-  return JSON.parse((await publicDownload(`${API}/repos/${RELEASE_REPO}/${path}`, 2097152)).toString('utf8'));
+export async function fetchReleaseMetadata(tag, token, fetcher = fetch) {
+  parseVersion(tag);
+  const response = await fetcher(`${API}/repos/${RELEASE_REPO}/releases/tags/${tag}`, {
+    redirect: 'error', signal: AbortSignal.timeout(30000),
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Aether-site-release-sync',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  assert.ok(response.ok, `Release metadata: HTTP ${response.status}`);
+  return JSON.parse((await responseBytes(response, 2097152)).toString('utf8'));
 }
-export async function loadVerifiedRelease(tag, { retries = 0, fetchRelease = publicJson, download = publicDownload, pause = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+export async function loadVerifiedRelease(tag, { retries = 0, releaseReadToken, fetchRelease = fetchReleaseMetadata, download = publicDownload, pause = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   parseVersion(tag);
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const info = describeRelease(await fetchRelease(`releases/tags/${tag}`));
+      const info = describeRelease(await fetchRelease(tag, releaseReadToken));
       const files = {};
-      for (const [name, asset] of Object.entries(info.assets)) files[name] = await download(asset.browser_download_url, asset.size);
+      for (const [name, asset] of Object.entries(info.assets)) {
+        try { files[name] = await download(asset.browser_download_url, asset.size); }
+        catch (error) { throw new Error(`Release file ${name}: ${error.message}`); }
+      }
       return verifyFiles(info, files);
     } catch (error) {
       lastError = error;
@@ -183,9 +193,9 @@ async function siteApi(path, token, body, method = 'GET', optional = false) {
   assert.ok(response.ok, `Site API ${method} ${path}: HTTP ${response.status}`);
   return JSON.parse((await responseBytes(response, 2097152)).toString('utf8'));
 }
-export async function syncSite({ tag, token, dryRun = false, output = null, retries = 0, getRelease = loadVerifiedRelease, requestSite = siteApi }) {
+export async function syncSite({ tag, token, releaseReadToken, dryRun = false, verifyWrite = false, output = null, retries = 0, getRelease = loadVerifiedRelease, requestSite = siteApi }) {
   assert.ok(dryRun || token, 'Add the AETHER_SITE_TOKEN Actions secret to aether-releases');
-  const release = await getRelease(tag, { retries });
+  const release = await getRelease(tag, { retries, releaseReadToken });
   const ref = await requestSite('git/ref/heads/main', token);
   const head = ref.object.sha;
   const commit = await requestSite(`git/commits/${head}`, token);
@@ -211,7 +221,16 @@ export async function syncSite({ tag, token, dryRun = false, output = null, retr
     await mkdir(output, { recursive: true });
     for (const file of result.files) await writeFile(resolve(output, file.path), file.content);
   }
-  if (dryRun || changed.length === 0) return { version: release.version, dryRun, changed: changed.map(file => file.path), files: result.files };
+  if (dryRun) return { version: release.version, dryRun, changed: changed.map(file => file.path), files: result.files };
+  if (changed.length === 0) {
+    if (verifyWrite) {
+      // An identical tree exercises Contents: write without a commit or Pages deployment.
+      const { path, mode, type, sha } = tree.tree.find(item => item.path === 'index.html');
+      const probe = await requestSite('git/trees', token, { base_tree: commit.tree.sha, tree: [{ path, mode, type, sha }] }, 'POST');
+      assert.equal(probe.sha, commit.tree.sha, 'Write check returned a different tree');
+    }
+    return { version: release.version, dryRun, changed: [], writeVerified: verifyWrite };
+  }
   const newTree = await requestSite('git/trees', token, { base_tree: commit.tree.sha, tree: changed.map(file => ({ ...file, mode: '100644', type: 'blob' })) }, 'POST');
   const newCommit = await requestSite('git/commits', token, { message: `Update website download to ${release.version}`, tree: newTree.sha, parents: [head] }, 'POST');
   await requestSite('git/refs/heads/main', token, { sha: newCommit.sha, force: false }, 'PATCH');
@@ -221,9 +240,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     const outputIndex = process.argv.indexOf('--output');
     const result = await syncSite({ tag: process.env.AETHER_RELEASE_TAG, token: process.env.AETHER_SITE_TOKEN,
+      releaseReadToken: process.env.AETHER_RELEASE_READ_TOKEN, verifyWrite: process.env.GITHUB_EVENT_NAME === 'workflow_dispatch',
       dryRun: process.argv.includes('--dry-run'), retries: process.env.GITHUB_ACTIONS === 'true' ? 4 : 0,
       output: outputIndex >= 0 ? process.argv[outputIndex + 1] : null });
-    console.log(JSON.stringify({ version: result.version, skipped: result.skipped, dryRun: result.dryRun, changed: result.changed, commit: result.commit }));
+    console.log(JSON.stringify({ version: result.version, skipped: result.skipped, dryRun: result.dryRun, changed: result.changed, writeVerified: result.writeVerified, commit: result.commit }));
   } catch (error) {
     console.error(`Site synchronization stopped: ${error instanceof Error ? error.message : 'unknown error'}`);
     process.exitCode = 1;

@@ -55,4 +55,5 @@ jobs:
         env:
           AETHER_RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
           AETHER_SITE_TOKEN: ${{ secrets.AETHER_SITE_TOKEN }}
+          AETHER_RELEASE_READ_TOKEN: ${{ github.token }}
         run: node .github/scripts/sync-site-release.mjs
