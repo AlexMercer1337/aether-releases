@@ -1,0 +1,58 @@
+name: Update Aether website after release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/**
+      - .github/workflows/sync-site-after-release.yml
+  pull_request:
+    paths:
+      - .github/scripts/**
+      - .github/workflows/sync-site-after-release.yml
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published public tag, for example v0.1.0-beta.19
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aether-site-release-sync
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.22.2'
+      - run: node --test .github/scripts/sync-site-release.test.mjs
+  sync-site:
+    needs: checks
+    if: github.repository == 'AlexMercer1337/aether-releases' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.22.2'
+      - name: Verify release and update website atomically
+        env:
+          AETHER_RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          AETHER_SITE_TOKEN: ${{ secrets.AETHER_SITE_TOKEN }}
+        run: node .github/scripts/sync-site-release.mjs
